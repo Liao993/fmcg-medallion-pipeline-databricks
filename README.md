@@ -1,286 +1,100 @@
-# FMCG Medallion Pipeline on Databricks
+# 🏭 FMCG Medallion Pipeline on Databricks
 
-Portfolio project: a production-style lakehouse pipeline that consolidates a newly acquired subsidiary's daily sales data into the parent company's monthly FMCG reporting model.
+![Databricks](https://img.shields.io/badge/Databricks-FF3621.svg?style=for-the-badge&logo=databricks&logoColor=white)
+![Delta Lake](https://img.shields.io/badge/Delta%20Lake-00ADD8.svg?style=for-the-badge&logo=delta&logoColor=white)
+![PySpark](https://img.shields.io/badge/PySpark-E25A1C.svg?style=for-the-badge&logo=apachespark&logoColor=white)
+![AWS S3](https://img.shields.io/badge/AWS%20S3-232F3E.svg?style=for-the-badge&logo=amazons3&logoColor=white)
+![SQL](https://img.shields.io/badge/SQL-003B57?style=for-the-badge&logo=postgresql&logoColor=white)
 
-The project demonstrates end-to-end data engineering work: raw file ingestion, medallion architecture, data quality handling, Delta Lake upserts, dimensional modeling, monthly fact aggregation, and BI-ready gold views.
+## 📌 Project Overview
+A production-style **Medallion (Bronze/Silver/Gold) lakehouse pipeline** built on Databricks and Delta Lake, simulating a real post-acquisition scenario: consolidating a newly acquired subsidiary's daily sales data into a parent company's monthly FMCG reporting model.
 
----
-
-## Project Summary
-
-A parent FMCG company acquired a retail chain called SportsBar. Both companies had different operational data formats, product identifiers, customer identifiers, and reporting grains. Leadership needed consolidated monthly sales reporting immediately after the acquisition.
-
-I built a Databricks and Delta Lake pipeline that:
-
-- Ingests daily CSV order files from an S3-style landing zone.
-- Preserves raw source data in a Bronze layer with file metadata.
-- Cleans and standardizes messy subsidiary data in Silver.
-- Resolves subsidiary product IDs to the parent company's product codes.
-- Builds a daily subsidiary fact table.
-- Re-aggregates only affected months into the parent company's monthly gold fact table.
-- Produces a BI-ready enriched view for dashboarding and Genie-style analytics.
+**Business Goal:** After an acquisition, leadership needed one consolidated, trustworthy sales report — but the two companies used different product IDs, customer IDs, and reporting grains (daily vs. monthly). This pipeline automates that consolidation so finance and sales ops get accurate monthly numbers without manual reconciliation.
 
 ---
 
-## Skills Demonstrated
-
-| Area | What I Built |
-|---|---|
-| Data Engineering | Batch ETL pipeline using PySpark notebooks in Databricks |
-| Lakehouse Architecture | Bronze, Silver, and Gold layers with Delta tables |
-| Incremental Processing | Staging tables plus Delta MERGE for repeatable batch loads |
-| Data Modeling | Dimension tables, child fact table, parent monthly fact table, enriched BI view |
-| Data Quality | Date parsing, duplicate removal, null filtering, invalid ID handling |
-| Business Logic | Daily subsidiary orders rolled up into monthly parent reporting grain |
-| Cloud Data Platform | S3-style landing and processed zones, Unity Catalog schemas |
-| Analytics Enablement | SQL view joining facts with date, customer, product, and price dimensions |
-| Version Control | Git-based project structure ready for GitHub portfolio sharing |
-
----
-
-## Business Problem
-
-The acquired company delivered daily order files, while the parent company reported sales at a monthly grain. The source data also contained real-world quality issues:
-
-- Multiple date formats, including weekday-prefixed strings such as `Tuesday, July 01, 2025`
-- Non-numeric customer IDs such as `INVALID` and `ABC987`
-- Missing order quantities
-- Duplicate order lines
-- Product IDs that needed to be mapped into parent-company product codes
-
-The hardest part was not only cleaning the data. The pipeline also had to update monthly totals correctly when new daily files arrived. A simple append would create inaccurate monthly reporting, so the pipeline identifies the affected month and recalculates that month only.
-
----
-
-## Architecture
+## 🏗️ Architecture
 
 ```text
-Daily CSV files
-      |
-      v
-Bronze
-  - fmcg.bronze.orders
-  - fmcg.bronze.staging_orders
-      |
-      v
-Silver
-  - fmcg.silver.orders
-  - fmcg.silver.staging_orders
-      |
-      v
-Gold child fact
-  - fmcg.gold.sb_fact_orders
-  - daily SportsBar sales grain
-      |
-      v
-Gold parent fact
-  - fmcg.gold.fact_orders
-  - monthly consolidated reporting grain
-      |
-      v
-BI / Analytics
-  - fmcg.gold.vw_fact_orders_enriched
+Daily CSV files (S3 landing zone)
+        │
+        ▼
+   Bronze  →  raw ingestion, file metadata, audit history
+        │
+        ▼
+   Silver  →  cleaned, deduplicated, IDs mapped to parent product codes
+        │
+        ▼
+Gold (Child)   →  daily subsidiary fact table
+        │
+        ▼
+Gold (Parent)  →  monthly consolidated fact table (Delta MERGE, month-aware recalculation)
+        │
+        ▼
+BI View  →  fmcg.gold.vw_fact_orders_enriched (joined with date/customer/product/price dims)
 ```
+
+![Star Schema](./star_schema.png)
 
 ---
 
-## Data Layers
+## 📊 Data Modeling
 
 | Layer | Table | Grain | Purpose |
 |---|---|---|---|
-| Bronze | `fmcg.bronze.orders` | Raw order row | Append-only historical landing table |
-| Bronze Staging | `fmcg.bronze.staging_orders` | Current batch | Isolates each incremental file batch |
-| Silver | `fmcg.silver.orders` | Clean daily order row | Standardized, deduplicated order data |
-| Silver Staging | `fmcg.silver.staging_orders` | Current batch | Feeds downstream incremental processing |
-| Gold Child | `fmcg.gold.sb_fact_orders` | Daily customer/product sales | Subsidiary fact table |
-| Gold Parent | `fmcg.gold.fact_orders` | Monthly customer/product sales | Consolidated parent-company reporting |
-| Gold View | `fmcg.gold.vw_fact_orders_enriched` | Monthly enriched sales | BI-ready semantic view |
-
-Delta Change Data Feed is enabled when tables are created so future downstream consumers can process changes incrementally.
+| Bronze | `fmcg.bronze.orders` | Raw row | Append-only raw history |
+| Silver | `fmcg.silver.orders` | Clean daily order | Deduplicated, standardized, IDs resolved |
+| Gold (Child) | `fmcg.gold.sb_fact_orders` | Daily | Subsidiary sales fact |
+| Gold (Parent) | `fmcg.gold.fact_orders` | Monthly | Consolidated parent-company fact |
+| Gold View | `vw_fact_orders_enriched` | Monthly | BI-ready star schema view |
 
 ---
 
-## Pipeline Logic
+## ⚙️ Key Engineering Decisions
 
-### 1. Bronze ingestion
-
-The Bronze layer reads raw CSV files and stores the original order data with ingestion metadata:
-
-- `read_timestamp`
-- `file_name`
-- `file_size`
-
-This creates an auditable raw history while a staging table keeps the current batch isolated for incremental processing.
-
-### 2. Silver cleaning and standardization
-
-The Silver layer applies five main transformations:
-
-| Issue | Solution |
-|---|---|
-| Missing `order_qty` | Drop rows where quantity is null |
-| Invalid customer IDs | Convert non-numeric IDs to sentinel value `999999` |
-| Weekday-prefixed dates | Strip weekday prefix with regex |
-| Multiple date formats | Parse with `try_to_date` across supported patterns |
-| Duplicate rows | Drop duplicates on the order-line business key |
-
-The cleaned order data is then joined to the product dimension so subsidiary product IDs resolve to the parent company's hashed `product_code`.
-
-### 3. Delta MERGE upserts
-
-Silver and Gold writes use Delta Lake `MERGE` logic so the pipeline can be rerun safely. Existing order lines are updated and new order lines are inserted.
-
-This makes the pipeline idempotent, which is important for:
-
-- Duplicate file deliveries
-- Late-arriving corrections
-- Notebook reruns during development
-- Scheduled batch jobs
-
-### 4. Month-aware incremental aggregation
-
-The parent table reports at monthly grain, but the subsidiary sends daily data. For each incremental load, the pipeline:
-
-1. Reads the Silver staging table.
-2. Identifies the calendar months touched by the current batch.
-3. Pulls all daily child fact rows for those months.
-4. Re-aggregates monthly totals from the daily fact table.
-5. Merges the corrected monthly totals into `fmcg.gold.fact_orders`.
-
-This avoids full-history recomputation while keeping monthly reporting accurate.
+- **Delta MERGE upserts** — Silver and Gold writes use `MERGE` instead of blind appends, making the pipeline idempotent and safe to rerun on duplicate files or late corrections.
+- **Staging tables for incremental isolation** — each layer writes the current batch to a staging table so incremental runs only touch new data, not full history.
+- **Month-aware recalculation** — the subsidiary sends daily data, but the parent reports monthly. Each incremental run detects which calendar months were touched and re-aggregates only those months, avoiding a full historical refresh.
+- **Data quality handling** — multiple date formats (including weekday-prefixed strings), invalid/non-numeric customer IDs, missing quantities, and duplicate rows are all resolved in Silver rather than silently dropped where possible (invalid IDs are mapped to a visible sentinel value instead of discarded).
+- **Change Data Feed enabled** on all Delta tables for future incremental/streaming consumers.
 
 ---
 
-## Results
+## 📈 Results
 
-### Historical full load
-
-| Metric | Result |
-|---|---:|
-| Raw order rows ingested | 51,810 |
-| Clean rows after Silver processing | About 40,811 |
-| Parent monthly fact rows created | 3,060 |
-| Historical coverage | July 2025 to November 2025 |
-
-### Incremental load
-
-| Metric | Result |
-|---|---:|
-| Raw December rows ingested | 9,967 |
-| Daily child fact rows after processing | 7,834 |
-| Monthly periods recalculated | December 2025 only |
-| Prior months touched | No |
+| Metric | Full Load | Incremental Load |
+|---|---:|---:|
+| Raw rows ingested | 51,810 | 9,967 |
+| Rows after cleaning | ~40,811 | 7,834 |
+| Monthly periods affected | Jul–Nov 2025 (3,060 rows) | Dec 2025 only |
+| Full history reprocessed? | N/A | No |
 
 ---
 
-## Repository Structure
+## 🗂️ Repository Structure
 
 ```text
 .
 ├── README.md
 ├── notebooks
-│   ├── 1_setup
-│   │   ├── setup_catalogs.py
-│   │   ├── utilities.py
-│   │   └── dim_date_table_creation.py
-│   ├── 2_dimensional_modeling
-│   │   ├── 1_customer_data_processing.ipynb
-│   │   ├── 2_products_data_processing.ipynb
-│   │   └── 3_pricing_data_processing.ipynb
-│   ├── 3_fact_modeling
-│   │   ├── 1_full_load_fact.ipynb
-│   │   └── 2_incremental_load_fact.ipynb
-│   ├── denormalized.sql
-│   └── Sales_BI_Insights
-├── data
-└── doc
+│   ├── 1_setup                  # catalog, schema, date dimension setup
+│   ├── 2_dimensional_modeling   # customers, products, pricing dims
+│   ├── 3_fact_modeling          # full load + incremental fact pipeline
+│   └── denormalized.sql         # BI-ready gold view
 ```
 
 ---
 
-## How to Run
+## 🚀 How to Run
 
-### Prerequisites
+1. **Setup:** run `notebooks/1_setup/setup_catalogs.py` and `dim_date_table_creation.py`
+2. **Dimensions:** run the three notebooks in `2_dimensional_modeling/`
+3. **Facts:** run `1_full_load_fact.ipynb` once, then `2_incremental_load_fact.ipynb` for each new batch
 
-- Databricks workspace
-- Unity Catalog enabled
-- Catalog named `fmcg`
-- Schemas named `bronze`, `silver`, and `gold`
-- Cloud storage landing zone for source CSV files
-
-### Setup
-
-Run the setup scripts first:
-
-```text
-notebooks/1_setup/setup_catalogs.py
-notebooks/1_setup/dim_date_table_creation.py
-```
-
-Then run the dimension notebooks:
-
-```text
-notebooks/2_dimensional_modeling/1_customer_data_processing.ipynb
-notebooks/2_dimensional_modeling/2_products_data_processing.ipynb
-notebooks/2_dimensional_modeling/3_pricing_data_processing.ipynb
-```
-
-Finally run the fact notebooks:
-
-```text
-notebooks/3_fact_modeling/1_full_load_fact.ipynb
-notebooks/3_fact_modeling/2_incremental_load_fact.ipynb
-```
+Requires a Databricks workspace with Unity Catalog enabled and an S3-style landing zone for source CSVs.
 
 ---
 
-## BI-Ready View
+## 💡 What This Demonstrates
 
-The SQL file `notebooks/denormalized.sql` creates:
-
-```sql
-fmcg.gold.vw_fact_orders_enriched
-```
-
-This view joins the monthly fact table with:
-
-- Date dimension
-- Customer dimension
-- Product dimension
-- Gross price dimension
-
-It also calculates `total_amount_inr` as:
-
-```sql
-sold_quantity * price_inr
-```
-
-The result is ready for dashboarding, business analysis, and natural-language BI exploration.
-
----
-
-## Key Design Decisions
-
-### Staging tables for incremental isolation
-
-Each layer writes the current batch to a staging table. Downstream notebooks read from staging instead of scanning the full historical table. This keeps incremental processing focused and easier to debug.
-
-### Delta MERGE for reliable reruns
-
-The pipeline uses Delta MERGE instead of blind appends for curated tables. This prevents duplicates and supports late updates.
-
-### Month-aware recalculation
-
-Because daily subsidiary data feeds a monthly parent table, the pipeline recalculates only the affected months. This keeps monthly reporting correct without a full refresh.
-
-### Sentinel IDs for invalid customers
-
-Invalid customer IDs are converted to `999999` instead of dropping the rows. This preserves sales volume while making the data quality issue visible for review.
-
----
-
-## What This Project Shows
-
-This project shows that I can design and implement a practical data pipeline, not just write isolated Spark transformations. I handled source-system mismatch, data quality problems, incremental loading, dimensional joins, fact table grain differences, and BI delivery in one complete workflow.
-
-It is designed as a realistic example of the type of work needed in data engineering roles that support analytics, finance, supply chain, sales operations, and executive reporting.
+End-to-end data engineering ownership: medallion architecture, Delta Lake upserts, dimensional modeling, incremental/idempotent batch processing, data quality remediation, and BI-ready delivery — the kind of pipeline needed to support finance, sales ops, and executive reporting after a real-world business event like an acquisition.
